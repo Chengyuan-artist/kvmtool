@@ -497,10 +497,31 @@ static int vfio_pci_bar_activate(struct kvm *kvm,
 		region->guest_phys_addr = bar_addr;
 
 	if (has_msix && (u32)bar_num == table->bar) {
-		table->guest_phys_addr = region->guest_phys_addr;
+		table->guest_phys_addr = region->guest_phys_addr + table->bar_offset;
 		ret = kvm__register_mmio(kvm, table->guest_phys_addr,
 					 table->size, false,
 					 vfio_pci_msix_table_access, pdev);
+
+		/*
+		 * This is to support nvme devices, because the msix table
+		 * shares a region with the mmio data, we need to avoid overlay
+		 * the memory of the msix table during the vfio_map_region.
+		 *
+		 * Here let the end address of the vfio_map_region mapped memory
+		 * not exceed the start address of the msix table. In theory,
+		 * we should also map the memory between the end address of the
+		 * msix table to the end address of the region, but the linux
+		 * nvme driver does not use the latter.
+		 *
+		 * Because the linux nvme driver does not use pba, so skip the
+		 * pba simulation directly.
+		 */
+		if (pdev->hdr.class[0] == 2 && pdev->hdr.class[1] == 8
+		    && pdev->hdr.class[2] == 1) {
+			region->info.size = table->bar_offset;
+			goto map;
+		}
+
 		/*
 		 * The MSIX table and the PBA structure can share the same BAR,
 		 * but for convenience we register different regions for mmio
@@ -522,6 +543,7 @@ static int vfio_pci_bar_activate(struct kvm *kvm,
 		goto out;
 	}
 
+map:
 	ret = vfio_map_region(kvm, vdev, region);
 out:
 	return ret;
@@ -548,6 +570,12 @@ static int vfio_pci_bar_deactivate(struct kvm *kvm,
 		success = kvm__deregister_mmio(kvm, table->guest_phys_addr);
 		/* kvm__deregister_mmio fails when the region is not found. */
 		ret = (success ? 0 : -ENOENT);
+
+		/* See vfio_pci_bar_activate(). */
+		if (pdev->hdr.class[0] == 2 && pdev->hdr.class[1] == 8
+		    && pdev->hdr.class[2] == 1)
+			goto unmap;
+
 		/* See vfio_pci_bar_activate(). */
 		if (ret < 0 || table->bar!= pba->bar)
 			goto out;
@@ -559,6 +587,7 @@ static int vfio_pci_bar_deactivate(struct kvm *kvm,
 		goto out;
 	}
 
+unmap:
 	vfio_unmap_region(kvm, region);
 	ret = 0;
 
@@ -832,7 +861,6 @@ static int vfio_pci_fixup_cfg_space(struct vfio_device *vdev)
 					   pba_bar_offset;
 
 		/* Tidy up the capability */
-		msix->table_offset &= PCI_MSIX_TABLE_BIR;
 		if (pdev->msix_table.bar == pdev->msix_pba.bar) {
 			/* Keep the same offset as the MSIX cap. */
 			pdev->msix_pba.bar_offset = pba_bar_offset;
@@ -907,6 +935,7 @@ static int vfio_pci_create_msix_table(struct kvm *kvm, struct vfio_device *vdev)
 	struct vfio_region_info info;
 
 	table->bar = msix->table_offset & PCI_MSIX_TABLE_BIR;
+	table->bar_offset = msix->table_offset & PCI_MSIX_TABLE_OFFSET;
 	pba->bar = msix->pba_offset & PCI_MSIX_TABLE_BIR;
 
 	nr_entries = (msix->ctrl & PCI_MSIX_FLAGS_QSIZE) + 1;
@@ -1332,7 +1361,7 @@ static int vfio_pci_init_intx(struct kvm *kvm, struct vfio_device *vdev)
 	return 0;
 }
 
-static int vfio_pci_configure_dev_irqs(struct kvm *kvm, struct vfio_device *vdev)
+static int vfio_pci_configure_dev_irqs(struct kvm *kvm, struct vfio_device *vdev) // TODO check
 {
 	int ret = 0;
 	struct vfio_pci_device *pdev = &vdev->pci;
@@ -1379,6 +1408,7 @@ int vfio_pci_setup_device(struct kvm *kvm, struct vfio_device *vdev)
 		vfio_dev_err(vdev, "failed to configure regions");
 		return ret;
 	}
+	vfio_dev_info(vdev, "Success to configure regions");
 
 	vdev->dev_hdr = (struct device_header) {
 		.bus_type	= DEVICE_BUS_PCI,
@@ -1390,12 +1420,14 @@ int vfio_pci_setup_device(struct kvm *kvm, struct vfio_device *vdev)
 		vfio_dev_err(vdev, "failed to register VFIO device");
 		return ret;
 	}
+	vfio_dev_info(vdev, "Success to register VFIO device");
 
 	ret = vfio_pci_configure_dev_irqs(kvm, vdev);
 	if (ret) {
 		vfio_dev_err(vdev, "failed to configure IRQs");
 		return ret;
 	}
+	vfio_dev_info(vdev, "Success to  configure IRQs");
 
 	return 0;
 }

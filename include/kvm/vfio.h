@@ -43,6 +43,7 @@ struct vfio_pci_msi_entry {
 struct vfio_pci_msix_table {
 	size_t				size;
 	unsigned int			bar;
+	u32				bar_offset; /* in the shared BAR */
 	u32				guest_phys_addr;
 };
 
