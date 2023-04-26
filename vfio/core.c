@@ -354,6 +354,9 @@ static int vfio_configure_devices(struct kvm *kvm)
 
 static int vfio_get_iommu_type(void)
 {
+	if (ioctl(vfio_container, VFIO_CHECK_EXTENSION, VFIO_TYPE1_NESTING_IOMMU))
+		return VFIO_TYPE1_NESTING_IOMMU;
+
 	if (ioctl(vfio_container, VFIO_CHECK_EXTENSION, VFIO_TYPE1v2_IOMMU))
 		return VFIO_TYPE1v2_IOMMU;
 
@@ -380,6 +383,8 @@ static int vfio_map_mem_bank(struct kvm *kvm, struct kvm_mem_bank *bank, void *d
 		pr_err("Failed to map 0x%llx -> 0x%llx (%llu) for DMA",
 		       dma_map.iova, dma_map.vaddr, dma_map.size);
 	}
+	pr_info("Success to map 0x%llx -> 0x%llx (%llu) for DMA",
+		       dma_map.iova, dma_map.vaddr, dma_map.size);
 
 	return ret;
 }
@@ -424,6 +429,7 @@ static int vfio_configure_reserved_regions(struct kvm *kvm,
 	}
 
 	fclose(file);
+	pr_info("vfio_configure_reserved_regions: successfully exited");
 
 	return ret;
 }
@@ -467,21 +473,25 @@ static struct vfio_group *vfio_group_create(struct kvm *kvm, unsigned long id)
 		pr_err("Failed to open IOMMU group %s", group_node);
 		goto err_free_group;
 	}
+	pr_info("Success to open IOMMU group %s", group_node);
 
 	if (ioctl(group->fd, VFIO_GROUP_GET_STATUS, &group_status)) {
 		pr_err("Failed to determine status of IOMMU group %lu", id);
 		goto err_close_group;
 	}
+	pr_info("Success to determine status of IOMMU group %lu", id);
 
 	if (!(group_status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
 		pr_err("IOMMU group %lu is not viable", id);
 		goto err_close_group;
 	}
+	pr_info("IOMMU group %lu is indeed viable", id);
 
 	if (ioctl(group->fd, VFIO_GROUP_SET_CONTAINER, &vfio_container)) {
 		pr_err("Failed to add IOMMU group %lu to VFIO container", id);
 		goto err_close_group;
 	}
+	pr_info("Success to add IOMMU group %lu to VFIO container", id);
 
 	list_add(&group->list, &vfio_groups);
 
@@ -523,6 +533,7 @@ vfio_group_get_for_dev(struct kvm *kvm, struct vfio_device *vdev)
 		vfio_dev_err(vdev, "failed to open '%s'", vdev->sysfs_path);
 		return NULL;
 	}
+	vfio_dev_info(vdev, "success to open '%s'", vdev->sysfs_path);
 
 	ret = readlinkat(dirfd, "iommu_group", group_path, PATH_MAX);
 	if (ret < 0) {
@@ -543,6 +554,7 @@ vfio_group_get_for_dev(struct kvm *kvm, struct vfio_device *vdev)
 	list_for_each_entry(group, &vfio_groups, list) {
 		if (group->id == group_id) {
 			group->refs++;
+			pr_info("vfio_group_get_for_dev: Find the group %ld", group_id);
 			return group;
 		}
 	}
@@ -638,7 +650,7 @@ static int vfio_container_init(struct kvm *kvm)
 		       iommu_type);
 		return ret;
 	} else {
-		pr_info("Using IOMMU type %d for VFIO container", iommu_type);
+		pr_info("Using IOMMU type %d for VFIO container(1 for VFIO_TYPE1_IOMMU\t3 for VFIO_TYPE1v2_IOMMU\t6 for VFIO_TYPE1_NESTING_IOMMU)", iommu_type);
 	}
 
 	return kvm__for_each_mem_bank(kvm, KVM_MEM_TYPE_RAM, vfio_map_mem_bank,
